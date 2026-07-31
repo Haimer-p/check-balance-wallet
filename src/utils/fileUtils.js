@@ -127,16 +127,24 @@ function isValidAddress(addr) {
 // ─── EXPORT EXCEL ─────────────────────────────────────────────────────────────
 
 export function exportToExcel(wallets, filename = 'wallet_balances') {
-  const rows = wallets.map((w, i) => ({
-    '#': i + 1,
-    'Wallet Address': w.address,
-    'Label': w.label || '',
-    'BNB Balance': w.bnb ?? 0,
-    'USDT Balance': w.usdt ?? 0,
-    'USDC Balance': w.usdc ?? 0,
-    'Total USD (est.)': w.totalUsd ?? 0,
-    'Status': w.status === 'success' ? (hasBalance(w) ? 'Has Balance' : 'Empty') : 'Error',
-  }));
+  const rows = wallets.map((w, i) => {
+    const bal = hasBalance(w);
+    const statusText = w.status === 'success'
+      ? (bal ? '✅ Có số dư' : '⭕ Trống')
+      : '❌ Lỗi';
+
+    return {
+      '#': i + 1,
+      'Wallet Address': w.address,
+      'Label': w.label || '',
+      'Có Số Dư': bal ? 'YES' : 'NO',   // ← cột riêng để filter nhanh
+      'BNB Balance': w.bnb ?? 0,
+      'USDT Balance': w.usdt ?? 0,
+      'USDC Balance': w.usdc ?? 0,
+      'Total USD (est.)': w.totalUsd ?? 0,
+      'Trạng Thái': statusText,
+    };
+  });
 
   const ws = XLSX.utils.json_to_sheet(rows);
 
@@ -144,24 +152,69 @@ export function exportToExcel(wallets, filename = 'wallet_balances') {
   ws['!cols'] = [
     { wch: 5 },   // #
     { wch: 45 },  // Address
-    { wch: 20 },  // Label
+    { wch: 22 },  // Label
+    { wch: 12 },  // Có Số Dư
     { wch: 18 },  // BNB
     { wch: 18 },  // USDT
     { wch: 18 },  // USDC
-    { wch: 18 },  // Total
-    { wch: 12 },  // Status
+    { wch: 18 },  // Total USD
+    { wch: 15 },  // Trạng Thái
   ];
 
-  // Style header row
   const range = XLSX.utils.decode_range(ws['!ref']);
+
+  // Style header row (row 0)
   for (let C = range.s.c; C <= range.e.c; C++) {
     const cellAddr = XLSX.utils.encode_cell({ r: 0, c: C });
     if (!ws[cellAddr]) continue;
     ws[cellAddr].s = {
-      font: { bold: true, color: { rgb: 'FFFFFF' } },
+      font: { bold: true, color: { rgb: 'FFFFFF' }, sz: 11 },
       fill: { fgColor: { rgb: '1A1A2E' } },
-      alignment: { horizontal: 'center' },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        bottom: { style: 'thin', color: { rgb: 'F0B90B' } },
+      },
     };
+  }
+
+  // Style data rows — color code "Có Số Dư" (col 3) and "Trạng Thái" (col 8)
+  for (let R = range.s.r + 1; R <= range.e.r; R++) {
+    const hasBalCell = XLSX.utils.encode_cell({ r: R, c: 3 }); // "Có Số Dư"
+    const statusCell = XLSX.utils.encode_cell({ r: R, c: 8 }); // "Trạng Thái"
+
+    const isYes = ws[hasBalCell]?.v === 'YES';
+    const isError = ws[statusCell]?.v?.includes('Lỗi');
+
+    // "Có Số Dư" cell color
+    if (ws[hasBalCell]) {
+      ws[hasBalCell].s = {
+        font: { bold: true, color: { rgb: isYes ? '166534' : '6B7280' } },
+        fill: { fgColor: { rgb: isYes ? 'DCFCE7' : 'F3F4F6' } },
+        alignment: { horizontal: 'center' },
+      };
+    }
+
+    // "Trạng Thái" cell color
+    if (ws[statusCell]) {
+      let fgColor = 'F3F4F6'; // gray default (empty)
+      let fontColor = '6B7280';
+      if (isYes) { fgColor = 'DCFCE7'; fontColor = '166534'; }       // green = has balance
+      if (isError) { fgColor = 'FEE2E2'; fontColor = '991B1B'; }     // red = error
+
+      ws[statusCell].s = {
+        font: { color: { rgb: fontColor } },
+        fill: { fgColor: { rgb: fgColor } },
+        alignment: { horizontal: 'center' },
+      };
+    }
+
+    // Right-align numeric balance cells (cols 4,5,6,7)
+    for (let C = 4; C <= 7; C++) {
+      const addr = XLSX.utils.encode_cell({ r: R, c: C });
+      if (ws[addr]) {
+        ws[addr].s = { alignment: { horizontal: 'right' }, numFmt: '#,##0.000000' };
+      }
+    }
   }
 
   const wb = XLSX.utils.book_new();
@@ -191,16 +244,20 @@ export function exportToExcel(wallets, filename = 'wallet_balances') {
 }
 
 export function exportToCSV(wallets) {
-  const rows = wallets.map((w, i) => ({
-    '#': i + 1,
-    'Wallet Address': w.address,
-    'Label': w.label || '',
-    'BNB': w.bnb ?? 0,
-    'USDT': w.usdt ?? 0,
-    'USDC': w.usdc ?? 0,
-    'Total USD': w.totalUsd ?? 0,
-    'Status': w.status === 'success' ? (hasBalance(w) ? 'Has Balance' : 'Empty') : 'Error',
-  }));
+  const rows = wallets.map((w, i) => {
+    const bal = hasBalance(w);
+    return {
+      '#': i + 1,
+      'Wallet Address': w.address,
+      'Label': w.label || '',
+      'Có Số Dư': bal ? 'YES' : 'NO',
+      'BNB': w.bnb ?? 0,
+      'USDT': w.usdt ?? 0,
+      'USDC': w.usdc ?? 0,
+      'Total USD': w.totalUsd ?? 0,
+      'Trạng Thái': w.status === 'success' ? (bal ? 'Có số dư' : 'Trống') : 'Lỗi',
+    };
+  });
   const csv = Papa.unparse(rows);
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `wallet_balances_${formatDateForFile()}.csv`);
 }
