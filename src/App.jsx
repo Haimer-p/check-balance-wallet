@@ -123,23 +123,24 @@ export default function App() {
     const addresses = wallets.map(w => w.address);
     let localErrors = 0;
 
-    const { results } = await batchGetBalances(
+    // FIX: callback now receives (completed, total, errCount, latestResult, latestIndex)
+    // We update only the single wallet that just finished — no TDZ reference to outer `results`
+    const { results: allResults } = await batchGetBalances(
       addresses,
-      (completed, total, errCount) => {
+      (completed, total, errCount, latestResult, latestIndex) => {
         if (cancelRef.current) return;
         localErrors = errCount;
         setProgress({ current: completed, total, errors: errCount });
 
-        // Update wallet rows progressively
-        setWallets(prev => {
-          const updated = [...prev];
-          // results are in order
-          for (let i = 0; i < completed; i++) {
-            if (results[i] && updated[i]) {
-              const r = results[i];
-              const totalUsd = (r.bnb || 0) * (bnbPrice || 0) + (r.usdt || 0) + (r.usdc || 0);
-              updated[i] = {
-                ...updated[i],
+        // Progressive update: only update the single row that just finished
+        if (latestResult != null && latestIndex != null) {
+          const r = latestResult;
+          const totalUsd = (r.bnb || 0) * (bnbPrice || 0) + (r.usdt || 0) + (r.usdc || 0);
+          setWallets(prev => {
+            const updated = [...prev];
+            if (updated[latestIndex]) {
+              updated[latestIndex] = {
+                ...updated[latestIndex],
                 bnb: r.bnb,
                 usdt: r.usdt,
                 usdc: r.usdc,
@@ -148,25 +149,25 @@ export default function App() {
                 error: r.error,
               };
             }
-          }
-          return updated;
-        });
+            return updated;
+          });
+        }
       },
       5 // concurrency
     );
 
     if (!cancelRef.current) {
-      // Final update with all results
+      // Final reconciliation pass with allResults (now safely resolved)
       setWallets(prev => prev.map((w, i) => {
-        const r = results[i];
+        const r = allResults[i];
         if (!r) return w;
         const totalUsd = (r.bnb || 0) * (bnbPrice || 0) + (r.usdt || 0) + (r.usdc || 0);
         return { ...w, bnb: r.bnb, usdt: r.usdt, usdc: r.usdc, totalUsd, status: r.status, error: r.error };
       }));
 
-      const successCount = results.filter(r => r.status === 'success').length;
+      const successCount = allResults.filter(r => r && r.status === 'success').length;
       addToast(
-        `Đã load ${successCount}/${results.length} ví${localErrors > 0 ? ` (${localErrors} lỗi)` : ''}`,
+        `Đã load ${successCount}/${allResults.length} ví${localErrors > 0 ? ` (${localErrors} lỗi)` : ''}`,
         localErrors > 0 ? 'warning' : 'success',
         localErrors > 0 ? '⚠️' : '✅'
       );
@@ -179,6 +180,7 @@ export default function App() {
 
     setLoading(false);
   }, [wallets, bnbPrice, addToast]);
+
 
   const handleCancel = () => {
     cancelRef.current = true;

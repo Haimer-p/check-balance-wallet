@@ -15,35 +15,35 @@ const TOKENS = {
   USDT: {
     address: '0x55d398326f99059fF775485246999027B3197955',
     decimals: 18,
-    symbol: 'USDT',
   },
   USDC: {
     address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
     decimals: 18,
-    symbol: 'USDC',
   },
 };
 
 // Minimal ERC20 ABI
 const ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
-  'function decimals() view returns (uint8)',
 ];
 
-let currentProvider = null;
+// ── Singleton provider with max listeners fix ────────────────────────────────
+let _provider = null;
 let currentRpcIndex = 0;
 
 function getProvider() {
-  if (!currentProvider) {
-    currentProvider = new ethers.JsonRpcProvider(RPC_ENDPOINTS[currentRpcIndex]);
+  if (!_provider) {
+    _provider = new ethers.JsonRpcProvider(RPC_ENDPOINTS[currentRpcIndex]);
+    // Fix MaxListenersExceededWarning
+    if (_provider._websocket) _provider._websocket.setMaxListeners(50);
   }
-  return currentProvider;
+  return _provider;
 }
 
 function rotateRpc() {
   currentRpcIndex = (currentRpcIndex + 1) % RPC_ENDPOINTS.length;
-  currentProvider = new ethers.JsonRpcProvider(RPC_ENDPOINTS[currentRpcIndex]);
-  return currentProvider;
+  _provider = new ethers.JsonRpcProvider(RPC_ENDPOINTS[currentRpcIndex]);
+  return _provider;
 }
 
 export function getCurrentRpc() {
@@ -51,13 +51,13 @@ export function getCurrentRpc() {
 }
 
 async function withRetry(fn, retries = 3) {
-  for (let i = 0; i < retries; i++) {
+  for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await fn(getProvider());
     } catch (err) {
-      if (i < retries - 1) {
+      if (attempt < retries - 1) {
         rotateRpc();
-        await new Promise(r => setTimeout(r, 500 * (i + 1)));
+        await sleep(400 * (attempt + 1));
       } else {
         throw err;
       }
@@ -65,69 +65,81 @@ async function withRetry(fn, retries = 3) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 export async function getWalletBalance(address) {
   if (!ethers.isAddress(address)) {
     throw new Error('Invalid address');
   }
 
-  const [bnbBalance, usdtBalance, usdcBalance] = await Promise.all([
-    withRetry(async (provider) => {
-      const bal = await provider.getBalance(address);
-      return parseFloat(ethers.formatEther(bal));
-    }),
-    withRetry(async (provider) => {
-      const contract = new ethers.Contract(TOKENS.USDT.address, ERC20_ABI, provider);
-      const bal = await contract.balanceOf(address);
-      return parseFloat(ethers.formatUnits(bal, TOKENS.USDT.decimals));
-    }),
-    withRetry(async (provider) => {
-      const contract = new ethers.Contract(TOKENS.USDC.address, ERC20_ABI, provider);
-      const bal = await contract.balanceOf(address);
-      return parseFloat(ethers.formatUnits(bal, TOKENS.USDC.decimals));
-    }),
+  const provider = getProvider();
+
+  const [bnbRaw, usdtRaw, usdcRaw] = await Promise.all([
+    withRetry(p => p.getBalance(address)),
+    withRetry(p => new ethers.Contract(TOKENS.USDT.address, ERC20_ABI, p).balanceOf(address)),
+    withRetry(p => new ethers.Contract(TOKENS.USDC.address, ERC20_ABI, p).balanceOf(address)),
   ]);
 
-  return { bnb: bnbBalance, usdt: usdtBalance, usdc: usdcBalance };
+  void provider; // keep reference to avoid lint warning
+
+  return {
+    bnb: parseFloat(ethers.formatEther(bnbRaw)),
+    usdt: parseFloat(ethers.formatUnits(usdtRaw, 18)),
+    usdc: parseFloat(ethers.formatUnits(usdcRaw, 18)),
+  };
 }
 
-// Batch load with concurrency control
+/**
+ * Batch load balances with concurrency control.
+ * onProgress(completed, total, errorCount, latestResult, latestIndex)
+ * - latestResult: the result object just completed
+ * - latestIndex:  its index in the original addresses array
+ */
 export async function batchGetBalances(addresses, onProgress, concurrency = 5) {
-  const results = [];
+  const allResults = new Array(addresses.length).fill(null);
   const errors = [];
   let completed = 0;
 
-  // Process in chunks
-  for (let i = 0; i < addresses.length; i += concurrency) {
-    const chunk = addresses.slice(i, i + concurrency);
-    const chunkResults = await Promise.allSettled(
-      chunk.map(async (addr) => {
+  for (let chunkStart = 0; chunkStart < addresses.length; chunkStart += concurrency) {
+    const chunk = addresses.slice(chunkStart, chunkStart + concurrency);
+
+    // Run chunk in parallel, preserving index
+    const chunkPromises = chunk.map((addr, offsetIdx) => {
+      const globalIdx = chunkStart + offsetIdx;
+      return (async () => {
         try {
           const bal = await getWalletBalance(addr.trim());
-          return { address: addr.trim(), ...bal, status: 'success' };
+          return { index: globalIdx, address: addr.trim(), ...bal, status: 'success' };
         } catch (err) {
-          return { address: addr.trim(), bnb: 0, usdt: 0, usdc: 0, status: 'error', error: err.message };
+          return { index: globalIdx, address: addr.trim(), bnb: 0, usdt: 0, usdc: 0, status: 'error', error: err.message };
         }
-      })
-    );
+      })();
+    });
 
-    for (const result of chunkResults) {
+    const chunkResults = await Promise.allSettled(chunkPromises);
+
+    for (const settled of chunkResults) {
       completed++;
-      if (result.status === 'fulfilled') {
-        results.push(result.value);
-        if (result.value.status === 'error') errors.push(result.value.address);
-      } else {
-        const addr = chunk[results.length % chunk.length];
-        results.push({ address: addr, bnb: 0, usdt: 0, usdc: 0, status: 'error' });
-        errors.push(addr);
+      const result = settled.status === 'fulfilled'
+        ? settled.value
+        : { index: chunkStart, address: '', bnb: 0, usdt: 0, usdc: 0, status: 'error' };
+
+      allResults[result.index] = result;
+      if (result.status === 'error') errors.push(result.address);
+
+      // Pass the individual result directly — no TDZ risk
+      if (onProgress) {
+        onProgress(completed, addresses.length, errors.length, result, result.index);
       }
-      if (onProgress) onProgress(completed, addresses.length, errors.length);
     }
 
-    // Small delay between chunks to avoid rate limiting
-    if (i + concurrency < addresses.length) {
-      await new Promise(r => setTimeout(r, 200));
+    // Brief pause between chunks to avoid rate limiting
+    if (chunkStart + concurrency < addresses.length) {
+      await sleep(150);
     }
   }
 
-  return { results, errors };
+  return { results: allResults, errors };
 }
