@@ -5,11 +5,7 @@ import Papa from 'papaparse';
 
 export function exportSampleFile(format = 'csv') {
   const sampleData = [
-    { 'Wallet Address': '0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8', 'Label': 'Binance Hot Wallet' },
-    { 'Wallet Address': '0xF977814e90dA44bFA03b6295A0616a897441aceC', 'Label': 'Binance Cold Wallet' },
-    { 'Wallet Address': '0x8894E0a0c962CB723c1976a4421c95949bE2D4E3', 'Label': 'Example Wallet 3' },
-    { 'Wallet Address': '0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549', 'Label': 'Example Wallet 4' },
-    { 'Wallet Address': '0xDFd5293D8e347dFe59E90eFd55b2956a1343963d', 'Label': 'Example Wallet 5' },
+    { 'Wallet Address': '0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8', 'Label': 'Ví mẫu 1' },
   ];
 
   if (format === 'csv') {
